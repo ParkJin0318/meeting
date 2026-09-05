@@ -66,10 +66,16 @@ public struct MeetingsView: View {
                     .foregroundStyle(MNColor.contents000)
                 Spacer()
                 if session.isRecording {
-                    Button("녹음 종료") {
-                        Task { await session.stopRecording() }
+                    HStack(spacing: MNSpacing.s8) {
+                        Button(session.isPaused ? "재개" : "일시 중지") {
+                            Task { await session.togglePause() }
+                        }
+                        .buttonStyle(MNOutlineButtonStyle())
+                        Button("녹음 종료") {
+                            Task { await session.stopRecording() }
+                        }
+                        .buttonStyle(MNDangerButtonStyle())
                     }
-                    .buttonStyle(MNDangerButtonStyle())
                 } else {
                     Button("녹음 시작") {
                         Task {
@@ -470,20 +476,24 @@ private struct MeetingRecordingView: View {
 
     private var bar: some View {
         HStack(spacing: MNSpacing.s12) {
-            RecordingPulse()
+            RecordingPulse(active: !session.isPaused)
             Text(meeting.title)
                 .font(MNFont.subtitle2)
                 .foregroundStyle(MNColor.contents000)
                 .lineLimit(1)
             TimelineView(.periodic(from: .now, by: 1)) { context in
-                Text(MNDateFormat.timer(from: meeting.startedAt ?? meeting.scheduledAt,
-                                        to: context.date))
+                Text(MNDateFormat.timer(seconds: session.recordingPause.elapsed(
+                    from: meeting.startedAt ?? meeting.scheduledAt, at: context.date)))
                     .font(MNFont.caption1.monospacedDigit())
                     .foregroundStyle(MNColor.contents150)
             }
             .fixedSize()
             Spacer(minLength: MNSpacing.s12)
             WaveformBars(meter: session.micMeter, height: 24, barWidth: 2, maxBars: 24)
+            Button(session.isPaused ? "재개" : "일시 중지") {
+                Task { await session.togglePause() }
+            }
+            .buttonStyle(MNOutlineButtonStyle())
             Button("녹음 종료") {
                 Task { await session.stopRecording() }
             }

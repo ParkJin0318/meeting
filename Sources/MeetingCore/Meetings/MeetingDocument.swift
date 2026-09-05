@@ -89,7 +89,8 @@ public enum MeetingDocument {
 
     public static func durationText(_ meeting: Meeting) -> String? {
         guard let start = meeting.startedAt, let end = meeting.endedAt else { return nil }
-        let seconds = Int(max(0, end.timeIntervalSince(start)))
+        // 일시 중지 구간은 파일에 없으므로 뺀다 — 전사의 마지막 타임코드와 맞는 값이다.
+        let seconds = Int(max(0, end.timeIntervalSince(start) - meeting.pausedSeconds))
         let minutes = seconds / 60
         return minutes >= 60
             ? "\(minutes / 60)시간 \(minutes % 60)분"

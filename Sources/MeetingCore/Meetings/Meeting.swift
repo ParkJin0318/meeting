@@ -27,6 +27,8 @@ public struct Meeting: Codable, Sendable, Identifiable, Hashable {
     public var scheduledAt: Date
     public var startedAt: Date?
     public var endedAt: Date?
+    /// 일시 중지로 빠진 벽시계 시간. 파일에는 남지 않으므로 길이 계산에서 뺀다.
+    public var pausedSeconds: TimeInterval
     public var status: Status
     public var systemAudioPath: String?
     public var micAudioPath: String?
@@ -44,7 +46,8 @@ public struct Meeting: Codable, Sendable, Identifiable, Hashable {
     public var vaultTranscriptPath: String?
 
     public init(id: String = UUID().uuidString, title: String, scheduledAt: Date = Date(),
-                startedAt: Date? = nil, endedAt: Date? = nil, status: Status = .scheduled,
+                startedAt: Date? = nil, endedAt: Date? = nil, pausedSeconds: TimeInterval = 0,
+                status: Status = .scheduled,
                 systemAudioPath: String? = nil, micAudioPath: String? = nil,
                 mixedAudioPath: String? = nil,
                 segments: [TranscriptSegment] = [],
@@ -59,6 +62,7 @@ public struct Meeting: Codable, Sendable, Identifiable, Hashable {
         self.scheduledAt = scheduledAt
         self.startedAt = startedAt
         self.endedAt = endedAt
+        self.pausedSeconds = pausedSeconds
         self.status = status
         self.systemAudioPath = systemAudioPath
         self.micAudioPath = micAudioPath
@@ -83,6 +87,7 @@ public struct Meeting: Codable, Sendable, Identifiable, Hashable {
         scheduledAt = try c.decode(Date.self, forKey: .scheduledAt)
         startedAt = try c.decodeIfPresent(Date.self, forKey: .startedAt)
         endedAt = try c.decodeIfPresent(Date.self, forKey: .endedAt)
+        pausedSeconds = try c.decodeIfPresent(TimeInterval.self, forKey: .pausedSeconds) ?? 0
         status = try c.decode(Status.self, forKey: .status)
         systemAudioPath = try c.decodeIfPresent(String.self, forKey: .systemAudioPath)
         micAudioPath = try c.decodeIfPresent(String.self, forKey: .micAudioPath)
@@ -171,12 +176,17 @@ public protocol MeetingRecording: Sendable {
     func start(meetingID: String) async throws
     func stop() async throws -> RecordedAudio
     func micLevels() -> AsyncStream<Float>
+    /// 일시 중지. 캡처는 계속 돌리고 파일 쓰기와 라이브 전달만 막는다 — 재개하면 같은 파일에 이어 쓴다.
+    /// 동기여야 한다: `MeetingCenter`가 suspension 없이 종료와 순서를 맞춘다.
+    func setPaused(_ paused: Bool)
 }
 
 extension MeetingRecording {
     public func micLevels() -> AsyncStream<Float> {
         AsyncStream { $0.finish() }
     }
+
+    public func setPaused(_ paused: Bool) {}
 }
 
 public struct TranscriptSegment: Codable, Sendable, Hashable {

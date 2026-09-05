@@ -128,7 +128,7 @@ public final class FloatingRecorderController {
 }
 
 struct FloatingRecorderView: View {
-    nonisolated static let recordingSize = CGSize(width: 232, height: 44)
+    nonisolated static let recordingSize = CGSize(width: 266, height: 44)
     nonisolated static let recordingLiveSize = CGSize(width: 380, height: 72)
     nonisolated static let detectedSize = CGSize(width: 344, height: 44)
 
@@ -170,11 +170,11 @@ struct FloatingRecorderView: View {
 
     private var controls: some View {
         HStack(spacing: MNSpacing.s8) {
-            RecordingPulse()
+            RecordingPulse(active: !session.isPaused)
             if let meeting = session.recordingMeeting {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
-                    Text(MNDateFormat.timer(from: meeting.startedAt ?? meeting.scheduledAt,
-                                            to: context.date))
+                    Text(MNDateFormat.timer(seconds: session.recordingPause.elapsed(
+                        from: meeting.startedAt ?? meeting.scheduledAt, at: context.date)))
                         .font(MNFont.caption1.monospacedDigit())
                         .foregroundStyle(MNColor.contents000)
                 }
@@ -187,6 +187,10 @@ struct FloatingRecorderView: View {
             Spacer(minLength: 0)
             WaveformBars(meter: session.micMeter, height: 18, barWidth: 2, maxBars: 16)
             Spacer(minLength: 0)
+            PillIconButton(systemName: session.isPaused ? "play.fill" : "pause.fill",
+                           label: session.isPaused ? "녹음 재개" : "일시 중지") {
+                Task { await session.togglePause() }
+            }
             PillIconButton(systemName: "stop.fill", label: "녹음 종료",
                            foreground: MNColor.fixedWhite, background: MNColor.roleRed) {
                 Task { await session.stopRecording() }
@@ -265,18 +269,34 @@ struct PillIconButton: View {
 }
 
 struct RecordingPulse: View {
-    @State private var pulsing = false
+    var active: Bool = true
 
     var body: some View {
-        Circle()
-            .fill(MNColor.roleRed)
-            .frame(width: 8, height: 8)
-            .opacity(pulsing ? 1 : 0.3)
-            .onAppear {
-                withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
-                    pulsing = true
+        // 분기로 뷰를 갈아끼운다 — 한 뷰 안에서 @State만 바꾸면 `pulsing`이 true로 남아
+        // 다시 켰을 때 애니메이션이 돌지 않는다.
+        if active {
+            PulsingDot()
+        } else {
+            Circle()
+                .fill(MNColor.contents150)
+                .frame(width: 8, height: 8)
+        }
+    }
+
+    private struct PulsingDot: View {
+        @State private var pulsing = false
+
+        var body: some View {
+            Circle()
+                .fill(MNColor.roleRed)
+                .frame(width: 8, height: 8)
+                .opacity(pulsing ? 1 : 0.3)
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                        pulsing = true
+                    }
                 }
-            }
+        }
     }
 }
 

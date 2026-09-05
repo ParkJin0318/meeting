@@ -38,6 +38,7 @@
 - 마이크 트랙엔 스피커로 나간 상대 목소리가 되돌아온다 — `EchoFilter` 임계 0.8을 낮추지 마라(내 말과 에코가 섞인 줄까지 접힌다)
 - 전사는 조용히 부분만 돌아온다 — `TranscriptCoverage`로 시간축을 세고 빈 구간만 짧은 클립으로 2패스(`LocalTranscriptionPipeline.recover`). 달라지는 건 모델이 아니라 **클립 경계**다. 2패스 결과는 `TranscriptRecovery`로 걸러 붙인다(시간 겹침·환각 루프)
 - 라이브 전사(`LiveTranscribing`)는 표시용 초벌 — 종료 후 파일 전사가 통째로 갈아끼운다. 탭 콜백에서는 **복사만**
+- 일시 중지는 파일을 **잘라 이어붙인다** — 무음 패딩 금지(`TranscriptCoverage`의 10초 임계가 휴식을 손실로 잡아 재전사·노트·요약까지 번진다). 캡처는 계속 돌리고 싱크의 `paused` 플래그로 쓰기만 막는다 — `SystemAudioTap.stop()`은 재개 불가(재시작이 같은 파일을 덮어쓴다). `Meeting.Status`가 아니라 `RecordingPause` 장부 + `pausedSeconds`로 표현한다
 - `MeetingSession`/AppState에 프레임마다 바뀌는 값을 `@Published`로 두지 않는다(마이크 레벨은 `MicLevelMeter`, 라이브 텍스트는 `LiveTranscriptStore`). 목록은 `LazyVStack` + 평평한 `ForEach` 하나(`MeetingList.rows`)
 - `Bundle.module`(diarize.py)은 번들이 없으면 fatalError — 손조립 .app은 `meeting_MeetingCore.bundle`을 `Contents/Resources/`에 복사해야 한다. 호스트의 패키징 스크립트도 같다
 - Core Audio 프로세스 탭은 Info.plist에 `NSAudioCaptureUsageDescription`이 필요하다(마이크 키만으로는 부족)

@@ -9,12 +9,18 @@ final class SystemTapSink: @unchecked Sendable {
     private var file: AVAudioFile?
     private var converter: AVAudioConverter?
     private var scratch: AVAudioPCMBuffer?
+    private var paused = false
     private var received = 0
     private var _firstBufferAt: Date?
     var firstBufferAt: Date? { lock.withLock { _firstBufferAt } }
 
     init(live: LiveAudioSink? = nil) {
         self.live = live
+    }
+
+    /// `close()`가 풀어 준다. 멈춘 동안은 `received`도 세지 않아 "소리가 온 적 없다" 판정이 흔들리지 않는다.
+    func setPaused(_ paused: Bool) {
+        lock.withLock { self.paused = paused }
     }
 
     func open(file: AVAudioFile, from source: AVAudioFormat) {
@@ -32,7 +38,7 @@ final class SystemTapSink: @unchecked Sendable {
     func receive(_ list: UnsafePointer<AudioBufferList>, format: AVAudioFormat) {
         var live: [Float]?
         lock.withLock {
-            guard let file else { return }
+            guard let file, !paused else { return }
             received += 1
             guard let input = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list,
                                                deallocator: nil),
@@ -66,6 +72,7 @@ final class SystemTapSink: @unchecked Sendable {
             file = nil
             converter = nil
             scratch = nil
+            paused = false
         }
     }
 }
@@ -155,6 +162,11 @@ final class SystemAudioTap: @unchecked Sendable {
     var didReceiveAudio: Bool { sink.receivedBuffers > 0 }
 
     var firstBufferAt: Date? { sink.firstBufferAt }
+
+    /// 탭·aggregate device는 그대로 두고 파일 쓰기만 막는다. `stop()`은 재개할 수 없다 — 다시 열면 같은 파일을 덮어쓴다.
+    func setPaused(_ paused: Bool) {
+        sink.setPaused(paused)
+    }
 
     func stop() {
         if let procID, aggregateID != AudioObjectID(kAudioObjectUnknown) {

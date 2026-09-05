@@ -5,6 +5,7 @@ final class MicTapState: @unchecked Sendable {
     private let lock = NSLock()
     private var file: AVAudioFile?
     private var levels: AsyncStream<Float>.Continuation?
+    private var paused = false
     private(set) var droppedAfterClose = 0
     private var _firstBufferAt: Date?
     var firstBufferAt: Date? { lock.withLock { _firstBufferAt } }
@@ -24,21 +25,34 @@ final class MicTapState: @unchecked Sendable {
         previous?.finish()
     }
 
-    func receive(_ buffer: AVAudioPCMBuffer?, level: @Sendable () -> Float) {
+    /// `close()`가 풀어 준다 — 열기 전에 걸린 pause는 그대로 살아 "멈춘 채 시작"이 된다.
+    func setPaused(_ paused: Bool) {
+        lock.withLock { self.paused = paused }
+    }
+
+    /// 버퍼를 받아들였으면 true. 닫힌 뒤나 멈춘 동안은 false — 호출자는 이 값으로 라이브 전달을 막는다.
+    @discardableResult
+    func receive(_ buffer: AVAudioPCMBuffer?, level: @Sendable () -> Float) -> Bool {
         lock.withLock {
             guard file != nil || levels != nil else {
                 droppedAfterClose += 1
-                return
+                return false
+            }
+            if paused {
+                levels?.yield(0)
+                return false
             }
             if _firstBufferAt == nil, buffer != nil { _firstBufferAt = Date() }
             if let buffer { try? file?.write(from: buffer) }
             levels?.yield(level())
+            return true
         }
     }
 
     func close() {
         let previous: AsyncStream<Float>.Continuation? = lock.withLock {
             file = nil
+            paused = false
             let previous = levels
             levels = nil
             return previous
@@ -84,10 +98,11 @@ public final class SystemAudioMeetingRecorder: MeetingRecording, @unchecked Send
             let live = self.live
             let sampleRate = format.sampleRate
             input.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
-                micTap.receive(buffer) { SystemAudioMeetingRecorder.meterLevel(of: buffer) }
-                guard live != nil else { return }
-                live?.append(samples: LiveAudio.monoSamples(of: buffer),
-                             sampleRate: sampleRate, track: .mic)
+                guard micTap.receive(buffer, level: {
+                    SystemAudioMeetingRecorder.meterLevel(of: buffer)
+                }), let live else { return }
+                live.append(samples: LiveAudio.monoSamples(of: buffer),
+                            sampleRate: sampleRate, track: .mic)
             }
             try engine.start()
             self.micEngine = engine
@@ -122,6 +137,13 @@ public final class SystemAudioMeetingRecorder: MeetingRecording, @unchecked Send
         currentSystemURL = nil
         currentMicURL = nil
         return audio
+    }
+
+    /// 캡처는 계속 돌린다 — 탭을 부수면 재개 때 파일을 새로 열어 앞부분을 덮어쓰고,
+    /// 엔진을 다시 켜면 쉬는 동안 입력 장치가 바뀐 경우 포맷 불일치로 죽는다.
+    public func setPaused(_ paused: Bool) {
+        micTap.setPaused(paused)
+        systemTap.setPaused(paused)
     }
 
     private func restoreInputVolumeIfNeeded() {

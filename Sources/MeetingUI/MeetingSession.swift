@@ -5,6 +5,8 @@ import MeetingCore
 public final class MeetingSession: ObservableObject {
     @Published public private(set) var meetings: [Meeting] = []
     @Published public private(set) var isRecording = false
+    /// 일시 중지 장부의 미러. 바뀌는 건 누르는 순간뿐이라 프레임 값이 아니다.
+    @Published public private(set) var recordingPause = RecordingPause()
     @Published public private(set) var detectedCall: CallDetection?
     @Published public private(set) var dismissedCall: CallDetection?
     @Published public private(set) var modelStatus: String?
@@ -21,6 +23,8 @@ public final class MeetingSession: ObservableObject {
     public init() {}
 
     public var showsLiveLine: Bool { services?.live != nil }
+
+    public var isPaused: Bool { recordingPause.isPaused }
 
     public var recordingMeeting: Meeting? {
         meetings.first { $0.status == .recording }
@@ -73,6 +77,8 @@ public final class MeetingSession: ObservableObject {
         if latest != meetings { meetings = latest }
         let recording = await services.center.isRecording
         if recording != isRecording { isRecording = recording }
+        let pause = await services.center.recordingPause
+        if pause != recordingPause { recordingPause = pause }
     }
 
     private func subscribeCallDetections(_ detector: CallDetector) {
@@ -117,6 +123,24 @@ public final class MeetingSession: ObservableObject {
         guard let services else { return }
         micMeter.start(services.recorder.micLevels())
         if let live = services.live { liveTranscript.start(live.updates()) }
+    }
+
+    /// 미터·라이브 텍스트·통화 감지 억제는 그대로 둔다 — `stop()`은 화면을 비우고,
+    /// 억제를 풀면 15초 뒤 감지 배너가 다시 떠 패널이 흔들린다.
+    public func pauseRecording() async {
+        guard let services, isRecording else { return }
+        await services.center.pauseRecording()
+        await reload()
+    }
+
+    public func resumeRecording() async {
+        guard let services, isRecording else { return }
+        await services.center.resumeRecording()
+        await reload()
+    }
+
+    public func togglePause() async {
+        if isPaused { await resumeRecording() } else { await pauseRecording() }
     }
 
     public func stopRecording() async {

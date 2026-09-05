@@ -14,6 +14,7 @@ public actor MeetingCenter {
     private let hostDisplayName: String
     private var liveSaver: Task<Void, Never>?
     private var activeMeetingID: String?
+    private var pause = RecordingPause()
     private var cachedStamps: [String: String] = [:]
     private var cachedMeetings: [Meeting] = []
     private var cacheTicket = 0
@@ -51,14 +52,15 @@ public actor MeetingCenter {
     public func startRecording(meetingID: String) async throws {
         guard activeMeetingID == nil else { throw RecordingError.alreadyRecording }
         activeMeetingID = meetingID
+        pause = RecordingPause()
         guard await store.meeting(id: meetingID) != nil else {
-            activeMeetingID = nil
+            clearActive()
             return
         }
         do {
             try await recorder.start(meetingID: meetingID)
         } catch {
-            activeMeetingID = nil
+            clearActive()
             _ = try await update(meetingID) {
                 $0.status = .failed
                 $0.failureReason = "녹음 시작 실패: \(error.localizedDescription)\n"
@@ -71,7 +73,7 @@ public actor MeetingCenter {
             $0.status = .recording
             $0.startedAt = Date()
         }) else {
-            activeMeetingID = nil
+            clearActive()
             return
         }
         await live?.start()
@@ -105,7 +107,7 @@ public actor MeetingCenter {
         }
     }
 
-    public func finishRecording() async throws -> FinishedRecording? {
+    public func finishRecording(at endedAt: Date? = nil) async throws -> FinishedRecording? {
         guard let meetingID = activeMeetingID, !isFinishing else { return nil }
         isFinishing = true
         let audio: RecordedAudio
@@ -113,7 +115,7 @@ public actor MeetingCenter {
             audio = try await recorder.stop()
         } catch {
             isFinishing = false
-            activeMeetingID = nil
+            clearActive()
             liveSaver?.cancel()
             _ = await live?.stop()
             _ = try await markFailed(meetingID,
@@ -123,8 +125,11 @@ public actor MeetingCenter {
         liveSaver?.cancel()
         liveSaver = nil
         let draft = await live?.stop() ?? []
+        let now = endedAt ?? Date()
+        let pausedSeconds = pause.total(at: now)
         let meeting = try await update(meetingID) {
-            $0.endedAt = Date()
+            $0.endedAt = now
+            $0.pausedSeconds = pausedSeconds
             $0.systemAudioPath = audio.systemAudioURL?.path
             $0.micAudioPath = audio.micURL?.path
             $0.status = .transcribing
@@ -134,9 +139,31 @@ public actor MeetingCenter {
             }
         }
         isFinishing = false
-        activeMeetingID = nil
+        clearActive()
         guard let meeting else { return nil }
         return FinishedRecording(meeting: meeting, audio: audio)
+    }
+
+    /// 쉬는 시간용. 미팅은 하나로 유지되고 재개하면 같은 파일에 이어 쓴다.
+    /// 종료 중(`isFinishing`)에는 무시한다 — `recorder.stop()` 사이에 장부가 바뀌면 `pausedSeconds`가 틀어진다.
+    public func pauseRecording(at now: Date = Date()) {
+        guard activeMeetingID != nil, !isFinishing, !pause.isPaused else { return }
+        pause.pause(at: now)
+        recorder.setPaused(true)
+    }
+
+    public func resumeRecording(at now: Date = Date()) {
+        guard activeMeetingID != nil, !isFinishing, pause.isPaused else { return }
+        pause.resume(at: now)
+        recorder.setPaused(false)
+    }
+
+    public var recordingPause: RecordingPause { pause }
+    public var isPaused: Bool { pause.isPaused }
+
+    private func clearActive() {
+        activeMeetingID = nil
+        pause = RecordingPause()
     }
 
     @discardableResult

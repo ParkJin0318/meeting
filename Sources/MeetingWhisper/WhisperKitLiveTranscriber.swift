@@ -60,6 +60,8 @@ public actor WhisperKitLiveTranscriber: LiveTranscribing {
         var baseIndex: Int = 0
         var confirmed: [TranscriptSegment] = []
         var pending: String = ""
+        /// 마지막 추론 뒤 새 샘플이 왔는가. 일시 중지처럼 입력이 끊기면 같은 꼬리를 매초 다시 돌리지 않는다.
+        var fresh = false
     }
 
     public func prewarm() async {
@@ -136,6 +138,7 @@ public actor WhisperKitLiveTranscriber: LiveTranscribing {
             guard !converted.isEmpty else { continue }
             var state = tracks[item.track, default: TrackState()]
             state.samples.append(contentsOf: converted)
+            state.fresh = true
             if let seconds {
                 let keep = Int(seconds * Self.sampleRate)
                 let excess = state.samples.count - keep
@@ -156,7 +159,9 @@ public actor WhisperKitLiveTranscriber: LiveTranscribing {
     }
 
     private func step(track: LiveTrack, handle: WhisperKitHandle) async -> Bool {
-        guard var state = tracks[track] else { return false }
+        guard var state = tracks[track], state.fresh else { return false }
+        state.fresh = false
+        tracks[track] = state
         let window = Double(state.samples.count) / Self.sampleRate
         guard window >= Self.minWindow else { return false }
 

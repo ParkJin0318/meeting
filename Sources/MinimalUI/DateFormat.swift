@@ -31,7 +31,11 @@ public enum MNDateFormat {
     }
 
     public static func timer(from start: Date, to end: Date) -> String {
-        let seconds = max(0, Int(end.timeIntervalSince(start)))
+        timer(seconds: end.timeIntervalSince(start))
+    }
+
+    public static func timer(seconds: TimeInterval) -> String {
+        let seconds = max(0, Int(seconds))
         if seconds >= 3600 {
             return String(format: "%d:%02d:%02d",
                           seconds / 3600, (seconds % 3600) / 60, seconds % 60)

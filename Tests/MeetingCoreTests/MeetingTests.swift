@@ -6,6 +6,7 @@ import Foundation
 final class FakeRecorder: MeetingRecording, @unchecked Sendable {
     private(set) var started: [String] = []
     private(set) var stopped = 0
+    private(set) var pausedStates: [Bool] = []
 
     func start(meetingID: String) async throws {
         started.append(meetingID)
@@ -14,6 +15,9 @@ final class FakeRecorder: MeetingRecording, @unchecked Sendable {
         stopped += 1
         return RecordedAudio(systemAudioURL: URL(fileURLWithPath: "/tmp/fake.mov"),
                              micURL: URL(fileURLWithPath: "/tmp/fake.caf"))
+    }
+    func setPaused(_ paused: Bool) {
+        pausedStates.append(paused)
     }
 }
 
@@ -71,6 +75,16 @@ struct FakeAnalyzer: MeetingSummarizing {
         #expect(doc.contains("- 화자: 나, 김디자이너"))
         #expect(doc.contains("## 요약"))
         #expect(doc.contains("## 전사"))
+    }
+
+    @Test func durationExcludesPausedTime() {
+        var meeting = sample()
+        meeting.pausedSeconds = 600
+        #expect(MeetingDocument.durationText(meeting) == "55분",
+                "쉬는 시간은 파일에 없으므로 길이에서 뺀다")
+
+        meeting.pausedSeconds = 10_000
+        #expect(MeetingDocument.durationText(meeting) == "0분")
     }
 
     @Test func slugStripsPathUnsafeCharacters() {
@@ -1011,6 +1025,148 @@ struct MeddlingTranscriber: Transcribing {
         _ = try await center.stopRecording()
     }
 
+    @Test func pauseOutsideRecordingIsIgnored() async throws {
+        let (center, _, recorder) = try makeCenter()
+
+        await center.pauseRecording()
+        await center.resumeRecording()
+
+        #expect(recorder.pausedStates.isEmpty)
+        #expect(await center.isPaused == false)
+    }
+
+    @Test func pauseAndResumeReachRecorderOnce() async throws {
+        let (center, _, recorder) = try makeCenter()
+        _ = try await center.startAdhocRecording(title: "쉬는 시간")
+
+        await center.pauseRecording()
+        await center.pauseRecording()
+        #expect(await center.isPaused)
+        #expect(await center.isRecording, "일시 중지는 여전히 녹음 세션이다")
+
+        await center.resumeRecording()
+        await center.resumeRecording()
+        #expect(await center.isPaused == false)
+        #expect(recorder.pausedStates == [true, false], "같은 상태로 두 번 부르면 녹음기에 안 간다")
+        _ = try await center.stopRecording()
+    }
+
+    @Test func finishingWhilePausedRecordsPausedSeconds() async throws {
+        let (center, store, recorder) = try makeCenter()
+        let meeting = try await center.startAdhocRecording(title: "쉬는 시간")
+        let base = Date()
+
+        await center.pauseRecording(at: base.addingTimeInterval(60))
+        await center.resumeRecording(at: base.addingTimeInterval(90))
+        await center.pauseRecording(at: base.addingTimeInterval(120))
+        let end = base.addingTimeInterval(180)
+        let finished = try #require(try await center.finishRecording(at: end))
+
+        #expect(recorder.stopped == 1)
+        #expect(finished.meeting.endedAt == end)
+        #expect(finished.meeting.pausedSeconds == 90, "열린 구간은 종료 시각까지 센다")
+        #expect(await center.isPaused == false, "종료하면 장부가 비워진다")
+        #expect(await center.recordingPause == RecordingPause())
+
+        let stored = try #require(await store.fetch(.meeting, id: meeting.id, as: Meeting.self))
+        #expect(stored.pausedSeconds == 90)
+        #expect(stored.status == .transcribing)
+    }
+
+    @Test func pauseDuringFinishIsIgnored() async throws {
+        final class SlowRecorder: MeetingRecording, @unchecked Sendable {
+            private let lock = NSLock()
+            private var _pausedStates: [Bool] = []
+            var pausedStates: [Bool] { lock.withLock { _pausedStates } }
+
+            func start(meetingID: String) async throws {}
+            func stop() async throws -> RecordedAudio {
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                return RecordedAudio(systemAudioURL: URL(fileURLWithPath: "/tmp/fake.mov"),
+                                     micURL: nil)
+            }
+            func setPaused(_ paused: Bool) { lock.withLock { _pausedStates.append(paused) } }
+        }
+        let store = try SQLiteMeetingStore.inMemory()
+        let recorder = SlowRecorder()
+        let center = MeetingCenter(store: store, recorder: recorder,
+                                   transcription: nil, analyzer: nil, mixer: PassthroughMixer())
+        _ = try await center.startAdhocRecording(title: "미팅")
+
+        async let finishing = try? center.finishRecording()
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        await center.pauseRecording()
+        let finished = await finishing
+
+        #expect(finished != nil)
+        #expect(recorder.pausedStates.isEmpty, "종료 중에 들어온 일시 중지는 장부를 건드리면 안 된다")
+        #expect(await center.isPaused == false)
+    }
+
+    @Test func deleteMeetingRefusedWhilePaused() async throws {
+        let (center, store, _) = try makeCenter()
+        let meeting = try await center.startAdhocRecording(title: "쉬는 중")
+        await center.pauseRecording()
+
+        try await center.deleteMeeting(id: meeting.id)
+
+        let kept = await store.fetch(.meeting, id: meeting.id, as: Meeting.self)
+        #expect(kept != nil, "일시 중지 중에도 활성 미팅이다")
+        _ = try await center.stopRecording()
+    }
+
+    @Test func pauseBeforeRecorderStartsStaysPaused() async throws {
+        final class SlowStartRecorder: MeetingRecording, @unchecked Sendable {
+            private let lock = NSLock()
+            private var _pausedStates: [Bool] = []
+            var pausedStates: [Bool] { lock.withLock { _pausedStates } }
+
+            func start(meetingID: String) async throws {
+                try? await Task.sleep(nanoseconds: 30_000_000)
+            }
+            func stop() async throws -> RecordedAudio {
+                RecordedAudio(systemAudioURL: URL(fileURLWithPath: "/tmp/fake.mov"), micURL: nil)
+            }
+            func setPaused(_ paused: Bool) { lock.withLock { _pausedStates.append(paused) } }
+        }
+        let store = try SQLiteMeetingStore.inMemory()
+        let recorder = SlowStartRecorder()
+        let center = MeetingCenter(store: store, recorder: recorder,
+                                   transcription: nil, analyzer: nil, mixer: PassthroughMixer())
+
+        async let starting = try? center.startAdhocRecording(title: "미팅")
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        await center.pauseRecording()
+        _ = await starting
+
+        #expect(await center.isRecording)
+        #expect(await center.isPaused, "시작 직후 누른 일시 중지는 시작이 끝나도 살아 있다")
+        #expect(recorder.pausedStates == [true])
+        _ = try await center.stopRecording()
+    }
+
+    @Test func failedStartClearsPauseLedger() async throws {
+        final class FailingRecorder: MeetingRecording, @unchecked Sendable {
+            struct Denied: Error {}
+            func start(meetingID: String) async throws {
+                try? await Task.sleep(nanoseconds: 30_000_000)
+                throw Denied()
+            }
+            func stop() async throws -> RecordedAudio { fatalError("unused") }
+        }
+        let store = try SQLiteMeetingStore.inMemory()
+        let center = MeetingCenter(store: store, recorder: FailingRecorder(),
+                                   transcription: nil, analyzer: nil, mixer: PassthroughMixer())
+
+        async let starting = try? center.startAdhocRecording(title: "미팅")
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        await center.pauseRecording()
+        _ = await starting
+
+        #expect(await center.isRecording == false)
+        #expect(await center.isPaused == false, "시작이 실패하면 장부도 비운다")
+    }
+
     @Test func transcriptionFailureMarksMeetingFailed() async throws {
         struct FailingTranscriber: Transcribing {
             func transcribe(audioURL: URL, hint: String?) async throws -> [TranscriptSegment] {
@@ -1750,11 +1906,12 @@ struct GapFillingTranscriber: Transcribing {
         #expect(meeting.diarizationNote == nil)
         #expect(meeting.origin == nil)
         #expect(meeting.coverage == nil)
+        #expect(meeting.pausedSeconds == 0)
     }
 
     @Test func roundTripKeepsNewFields() throws {
         let meeting = Meeting(
-            title: "위클리", status: .done,
+            title: "위클리", pausedSeconds: 90, status: .done,
             segments: [TranscriptSegment(speaker: "상대1", start: 0, end: 3, text: "안녕하세요")],
             speakerNames: ["상대1": "김OO"], diarizationNote: "건너뜀",
             origin: Meeting.Origin(appName: "Google Chrome",
@@ -1766,6 +1923,7 @@ struct GapFillingTranscriber: Transcribing {
         #expect(decoded.segments == meeting.segments)
         #expect(decoded.speakerNames == ["상대1": "김OO"])
         #expect(decoded.origin?.bundleID == "com.google.Chrome")
+        #expect(decoded.pausedSeconds == 90)
     }
 
     @Test func parsesLegacyTranscriptBackIntoSegments() {
